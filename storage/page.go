@@ -12,14 +12,43 @@ import (
 // pageOffsetLSN is the byte offset of the LSN within the page.
 const pageOffsetLSN = 0
 
+type QueueState int
+
+// Define the possible values as constants using iota
+const (
+	NoQueue       QueueState = iota // 0
+	RareQueue                       // 1
+	FrequentQueue                   // 2
+)
+
 // PageFrame represents a physical page of data in memory.
 // It holds the raw bytes of the page and acts as the container for Buffer Pool management.
+
+type FrameState uint8
+
+const (
+	FrameFree     FrameState = iota // empty / available
+	FrameLoading                    // ReadPage in progress
+	FrameReady                      // valid bytes, usable
+	FrameFlushing                   // WritePage in progress
+	FrameEvicting                   // being reclaimed / logically unavailable
+)
+
 type PageFrame struct {
-	// Bytes holds the raw physical data of the page.
-	Bytes [common.PageSize]byte
-	// PageLatch protects the content of the page from concurrent access.
+	Bytes     [common.PageSize]byte
 	PageLatch sync.RWMutex
-	// Hint: You will need to add fields and synchronization structures here to track the state of this page.
+
+	// protected by bp.lock
+	pinCount int
+	dirty    bool
+
+	whichQueue QueueState
+	queueNode  *QueueNode
+
+	pageId common.PageID
+
+	state     FrameState
+	stateCond *sync.Cond
 }
 
 // Detect system endianness -- compiler should statically replace this with a constant
