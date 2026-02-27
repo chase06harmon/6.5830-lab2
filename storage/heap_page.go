@@ -141,14 +141,18 @@ func (hp HeapPage) MarkAllocated(rid common.RecordID, allocated bool) {
 
 	if allocated {
 		allocatedSlot := int(rid.Slot)
-		allocatedBitmap.SetBit(allocatedSlot, true)
+		wasAllocated := allocatedBitmap.SetBit(allocatedSlot, true)
 		deletedBitMap.SetBit(allocatedSlot, false)
-		hp.setNumUsed(hp.NumUsed() + 1)
+		if !wasAllocated {
+			hp.setNumUsed(hp.NumUsed() + 1)
+		}
 	} else {
 		freedSlot := int(rid.Slot)
-		allocatedBitmap.SetBit(freedSlot, false)
+		wasAllocated := allocatedBitmap.SetBit(freedSlot, false)
 		deletedBitMap.SetBit(freedSlot, false)
-		hp.setNumUsed(hp.NumUsed() - 1)
+		if wasAllocated {
+			hp.setNumUsed(hp.NumUsed() - 1)
+		}
 
 		if freedSlot < hp.StartHint() {
 			hp.setStartHint(freedSlot)
@@ -159,7 +163,7 @@ func (hp HeapPage) MarkAllocated(rid common.RecordID, allocated bool) {
 
 func (hp HeapPage) IsDeleted(rid common.RecordID) bool {
 	numSlots := hp.NumSlots()
-	if rid.Slot > int32(numSlots) {
+	if rid.Slot >= int32(numSlots) {
 		fmt.Println("slot: ", rid.Slot, " numSlots: ", numSlots)
 	}
 	deletedBitMap := AsBitmap(hp.frame.Bytes[hp.deletedBitmapStartByte:], numSlots)

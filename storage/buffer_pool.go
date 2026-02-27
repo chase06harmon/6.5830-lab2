@@ -324,6 +324,8 @@ func (bp *BufferPool) UnpinPage(frame *PageFrame, setDirty bool) {
 	bp.lock.Lock()
 	defer bp.lock.Unlock()
 
+	bp.waitReady(frame) // need to wait for flushAllPages to finish flushing so the dirty bit doesn't get overwritten
+
 	frame.pinCount--
 
 	if setDirty {

@@ -2,6 +2,7 @@ package execution
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 
 	"mit.edu/dsg/godb/catalog"
@@ -20,15 +21,17 @@ type TableHeap struct {
 	logManager  storage.LogManager
 	lockManager *transaction.LockManager
 
-	numPages      int
-	lock          sync.Mutex
-	expandingCond *sync.Cond
-	isExpanding   bool
+	numPages        int
+	lock            sync.Mutex
+	expandingCond   *sync.Cond
+	isExpanding     bool
+	insertablePages []int
 }
 
 // NewTableHeap creates a TableHeap and performs a metadata scan to initialize stats.
 func NewTableHeap(table *catalog.Table, bufferPool *storage.BufferPool, logManager storage.LogManager, lockManager *transaction.LockManager) (*TableHeap, error) {
 	columnTypes := make([]common.Type, len(table.Columns))
+	fmt.Println("CALLING NEW TABLE HEAP")
 
 	for i, col := range table.Columns {
 		columnTypes[i] = col.Type
@@ -44,6 +47,8 @@ func NewTableHeap(table *catalog.Table, bufferPool *storage.BufferPool, logManag
 		return nil, err
 	}
 
+	insertablePages := make([]int, 0)
+
 	if pageNum == 0 {
 		if _, err := dbFile.AllocatePage(1); err != nil {
 			return nil, err
@@ -58,15 +63,31 @@ func NewTableHeap(table *catalog.Table, bufferPool *storage.BufferPool, logManag
 		frame.PageLatch.Unlock()
 		bufferPool.UnpinPage(frame, true)
 		pageNum = 1
+		insertablePages = append(insertablePages, 0)
+
+	} else {
+		for i := 0; i < pageNum; i++ {
+			frame, err := bufferPool.GetPage(common.PageID{Oid: table.Oid, PageNum: int32(i)})
+			if err != nil {
+				return nil, err
+			}
+
+			hp := frame.AsHeapPage()
+			if hp.NumUsed() < hp.NumSlots() {
+				insertablePages = append(insertablePages, i)
+			}
+		}
+
 	}
 
 	tableHeap := TableHeap{
-		oid:         table.Oid,
-		desc:        desc,
-		bufferPool:  bufferPool,
-		logManager:  logManager,
-		lockManager: lockManager,
-		numPages:    pageNum,
+		oid:             table.Oid,
+		desc:            desc,
+		bufferPool:      bufferPool,
+		logManager:      logManager,
+		lockManager:     lockManager,
+		numPages:        pageNum,
+		insertablePages: insertablePages,
 	}
 
 	tableHeap.expandingCond = sync.NewCond(&tableHeap.lock)
@@ -87,6 +108,53 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 		for tableHeap.isExpanding {
 			tableHeap.expandingCond.Wait()
 		}
+
+		if numInsertable := len(tableHeap.insertablePages); numInsertable > 0 {
+			pageNum := tableHeap.insertablePages[numInsertable-1]
+			tableHeap.insertablePages = tableHeap.insertablePages[:numInsertable-1]
+			tableHeap.lock.Unlock()
+
+			frame, err := tableHeap.bufferPool.GetPage(common.PageID{Oid: tableHeap.oid, PageNum: int32(pageNum)})
+			if err != nil {
+				return common.RecordID{}, err
+			}
+
+			frame.PageLatch.Lock()
+
+			hp := frame.AsHeapPage()
+			slot := int32(hp.FindFreeSlot())
+			if slot != -1 {
+				// Found space — insert and return
+				rid := common.RecordID{
+					PageID: common.PageID{Oid: tableHeap.oid, PageNum: int32(pageNum)},
+					Slot:   slot,
+				}
+				hp.MarkAllocated(rid, true)
+				hp.MarkDeleted(rid, false)
+
+				rawTup := hp.AccessTuple(rid)
+				copy(rawTup, row)
+				numUsed := hp.NumUsed()
+				numSlots := hp.NumSlots()
+
+				frame.PageLatch.Unlock()
+				tableHeap.bufferPool.UnpinPage(frame, true)
+
+				tableHeap.lock.Lock()
+				if numUsed < numSlots {
+					tableHeap.insertablePages = append(tableHeap.insertablePages, pageNum)
+				}
+				tableHeap.lock.Unlock()
+
+				return rid, nil
+			} else {
+				frame.PageLatch.Unlock()
+				tableHeap.bufferPool.UnpinPage(frame, false)
+				continue
+			}
+
+		}
+
 		lastPageNum := tableHeap.numPages - 1
 		tableHeap.lock.Unlock()
 
@@ -126,7 +194,6 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 			tableHeap.isExpanding = true
 			tableHeap.lock.Unlock()
 
-			newPageNum := lastPageNum + 1
 			dbFile, err := tableHeap.bufferPool.StorageManager().GetDBFile(tableHeap.oid)
 			if err != nil {
 				tableHeap.lock.Lock()
@@ -135,13 +202,16 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 				tableHeap.lock.Unlock()
 				return common.RecordID{}, err
 			}
-			if _, err := dbFile.AllocatePage(1); err != nil {
+			startPage, err := dbFile.AllocatePage(1)
+			if err != nil {
 				tableHeap.lock.Lock()
 				tableHeap.isExpanding = false
 				tableHeap.expandingCond.Broadcast()
 				tableHeap.lock.Unlock()
 				return common.RecordID{}, err
 			}
+
+			newPageNum := startPage
 
 			newFrame, err := tableHeap.bufferPool.GetPage(common.PageID{Oid: tableHeap.oid, PageNum: int32(newPageNum)})
 			if err != nil {
@@ -159,7 +229,11 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 			tableHeap.bufferPool.UnpinPage(newFrame, true)
 
 			tableHeap.lock.Lock()
-			tableHeap.numPages++
+			if pages, err := dbFile.NumPages(); err == nil {
+				tableHeap.numPages = pages
+			} else {
+				tableHeap.numPages++
+			}
 			tableHeap.isExpanding = false
 			tableHeap.expandingCond.Broadcast()
 			tableHeap.lock.Unlock()
@@ -184,18 +258,31 @@ func (tableHeap *TableHeap) DeleteTuple(txn *transaction.TransactionContext, rid
 	}
 
 	dirty := false
-	defer func() { tableHeap.bufferPool.UnpinPage(frame, dirty) }()
-
 	frame.PageLatch.Lock()
-	defer frame.PageLatch.Unlock()
 
 	hp := frame.AsHeapPage()
 	if !hp.IsAllocated(rid) || hp.IsDeleted(rid) {
+		frame.PageLatch.Unlock()
+		tableHeap.bufferPool.UnpinPage(frame, false)
 		return ErrTupleDeleted
 	}
 
 	hp.MarkDeleted(rid, true)
 	dirty = true
+
+	frame.PageLatch.Unlock()
+	tableHeap.bufferPool.UnpinPage(frame, dirty)
+
+	tableHeap.lock.Lock()
+	defer tableHeap.lock.Unlock()
+	for i := 0; i < len(tableHeap.insertablePages); i++ {
+		if tableHeap.insertablePages[i] == int(rid.PageID.PageNum) {
+			return nil
+		}
+	}
+
+	tableHeap.insertablePages = append(tableHeap.insertablePages, int(rid.PageID.PageNum))
+
 	return nil
 }
 
@@ -257,6 +344,7 @@ func (tableHeap *TableHeap) UpdateTuple(txn *transaction.TransactionContext, rid
 // If slots are deleted AND no transaction holds a lock on them, they are marked as free.
 // This is used to reclaim space in the background.
 func (tableHeap *TableHeap) VacuumPage(pageID common.PageID) error {
+	fmt.Println("CALLING VACUUM PAGE")
 	pageFrame, err := tableHeap.bufferPool.GetPage(pageID)
 	if err != nil {
 		return err
@@ -291,6 +379,10 @@ func (tableHeap *TableHeap) Iterator(txn *transaction.TransactionContext, mode t
 	pages := tableHeap.numPages
 	tableHeap.lock.Unlock()
 
+	if pages == 0 {
+		return TableHeapIterator{}, nil
+	}
+
 	it := TableHeapIterator{
 		tableHeap:  tableHeap,
 		curPageNum: 0,
@@ -301,7 +393,10 @@ func (tableHeap *TableHeap) Iterator(txn *transaction.TransactionContext, mode t
 		mode:       mode,
 	}
 
-	frame, _ := tableHeap.bufferPool.GetPage(common.PageID{Oid: tableHeap.oid, PageNum: it.curPageNum})
+	frame, err := tableHeap.bufferPool.GetPage(common.PageID{Oid: tableHeap.oid, PageNum: it.curPageNum})
+	if err != nil {
+		return TableHeapIterator{}, err
+	}
 	it.curPageFrame = frame
 
 	return it, nil
@@ -322,7 +417,7 @@ type TableHeapIterator struct {
 
 // IsNil returns true if the TableHeapIterator is the default, uninitialized value
 func (it *TableHeapIterator) IsNil() bool {
-	panic("unimplemented")
+	return it == nil || it.tableHeap == nil
 }
 
 // Next advances the iterator to the next valid tuple.
