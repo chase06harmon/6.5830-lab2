@@ -2,7 +2,6 @@ package execution
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 
 	"mit.edu/dsg/godb/catalog"
@@ -31,8 +30,6 @@ type TableHeap struct {
 // NewTableHeap creates a TableHeap and performs a metadata scan to initialize stats.
 func NewTableHeap(table *catalog.Table, bufferPool *storage.BufferPool, logManager storage.LogManager, lockManager *transaction.LockManager) (*TableHeap, error) {
 	columnTypes := make([]common.Type, len(table.Columns))
-	fmt.Println("CALLING NEW TABLE HEAP")
-
 	for i, col := range table.Columns {
 		columnTypes[i] = col.Type
 	}
@@ -344,7 +341,6 @@ func (tableHeap *TableHeap) UpdateTuple(txn *transaction.TransactionContext, rid
 // If slots are deleted AND no transaction holds a lock on them, they are marked as free.
 // This is used to reclaim space in the background.
 func (tableHeap *TableHeap) VacuumPage(pageID common.PageID) error {
-	fmt.Println("CALLING VACUUM PAGE")
 	pageFrame, err := tableHeap.bufferPool.GetPage(pageID)
 	if err != nil {
 		return err
