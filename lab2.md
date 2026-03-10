@@ -172,6 +172,8 @@ Run `go test -v ./execution -run IndexExecutor`
   update, you may need to read the tuple first and construct the new tuple value. Check if the updated columns are part
   of any index key. If so, update the index entries (delete old key, insert new key).
 
+NOTE: Insert, Delete, Update executors follow standard SQL semantics. These executors should consume all tuples from their child executors and return a single output containing the number of rows affected (e.g. rows inserted, deleted, or updated).
+
 **Test:**
 Run `go test -v ./execution -run ModificationExecutor`
 
