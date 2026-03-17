@@ -168,8 +168,7 @@ Run `go test -v ./execution -run IndexExecutor` (NOTE: run this test only after 
   active indexes defined on the table.
 * **Delete (`DeletionExecutor`)**: Delete tuples from the `TableHeap`. You can assume that the child will read the entire
   tuple. You must also remove the corresponding keys from all active indexes.
-* **Update (`UpdateExecutor`)**: Update the tuple in the `TableHeap`. Because the child will only return the columns to
-  update, you may need to read the tuple first and construct the new tuple value. Check if the updated columns are part
+* **Update (`UpdateExecutor`)**: Update the tuple in the `TableHeap`. Check if the updated columns are part
   of any index key. If so, update the index entries (delete old key, insert new key).
 
 NOTE: Insert, Delete, Update executors follow standard SQL semantics. These executors should consume all tuples from their child executors and return a single output containing the number of rows affected (e.g. rows inserted, deleted, or updated).
