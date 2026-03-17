@@ -7,7 +7,8 @@ import (
 
 // AggregateExecutor implements hash-based aggregation.
 type AggregateExecutor struct {
-	// Fill me in!
+	planNode      *planner.SortNode
+	childExecutor Executor
 }
 
 func NewAggregateExecutor(plan *planner.AggregateNode, child Executor) *AggregateExecutor {
