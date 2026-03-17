@@ -387,6 +387,7 @@ func (tableHeap *TableHeap) Iterator(txn *transaction.TransactionContext, mode t
 		numPages:   pages,
 		txn:        txn,
 		mode:       mode,
+		err:        nil,
 	}
 
 	frame, err := tableHeap.bufferPool.GetPage(common.PageID{Oid: tableHeap.oid, PageNum: it.curPageNum})
@@ -409,6 +410,7 @@ type TableHeapIterator struct {
 
 	txn  *transaction.TransactionContext
 	mode transaction.DBLockMode
+	err  error
 }
 
 // IsNil returns true if the TableHeapIterator is the default, uninitialized value
@@ -457,6 +459,7 @@ func (it *TableHeapIterator) Next() bool {
 			frame, err := it.tableHeap.bufferPool.GetPage(common.PageID{Oid: it.tableHeap.oid, PageNum: it.curPageNum})
 			if err != nil {
 				// optionally stash err into iterator state and return false
+				it.err = err
 				return false
 			}
 			it.curPageFrame = frame
@@ -482,7 +485,7 @@ func (it *TableHeapIterator) CurrentRID() common.RecordID {
 
 // CurrentRID returns the first error encountered during iteration, if any.
 func (it *TableHeapIterator) Error() error {
-	return nil
+	return it.err
 }
 
 // Close releases any resources associated with the TableHeapIterator

@@ -7,34 +7,60 @@ import (
 
 // SeqScanExecutor implements a sequential scan over a table.
 type SeqScanExecutor struct {
-	// Fill me in!
+	scanNode  *planner.SeqScanNode
+	tableHeap *TableHeap
+
+	iterator *TableHeapIterator
+	buffer   []byte
 }
 
 // NewSeqScanExecutor creates a new SeqScanExecutor.
 func NewSeqScanExecutor(plan *planner.SeqScanNode, tableHeap *TableHeap) *SeqScanExecutor {
-	panic("unimplemented")
+	buf := make([]byte, tableHeap.desc.BytesPerTuple())
+	seqScanExecutor := SeqScanExecutor{
+		plan,
+		tableHeap,
+		nil,
+		buf,
+	}
+
+	return &seqScanExecutor
 }
 
 func (e *SeqScanExecutor) PlanNode() planner.PlanNode {
-	panic("unimplemented")
+	return e.scanNode
 }
 
 func (e *SeqScanExecutor) Init(context *ExecutorContext) error {
-	panic("unimplemented")
+	// might need to clear buffer here.. close original e.iterator
+	iter, err := e.tableHeap.Iterator(
+		context.GetTransaction(), e.scanNode.Mode, e.buffer,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	e.iterator = &iter
+	return nil
+
 }
 
+// Note: Probably want to preallocate buffer and copy contents
+
 func (e *SeqScanExecutor) Next() bool {
-	panic("unimplemented")
+	return e.iterator.Next()
 }
 
 func (e *SeqScanExecutor) Current() storage.Tuple {
-	panic("unimplemented")
+	return storage.FromRawTuple(e.iterator.CurrentTuple(), e.tableHeap.StorageSchema(), e.iterator.CurrentRID())
 }
 
 func (e *SeqScanExecutor) Error() error {
-	panic("unimplemented")
+	return e.iterator.Error()
 }
 
 func (e *SeqScanExecutor) Close() error {
-	panic("unimplemented")
+	// maybe release the buffer here?
+	return e.iterator.Close()
 }

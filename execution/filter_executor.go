@@ -7,35 +7,48 @@ import (
 
 // FilterExecutor filters tuples from its child executor based on a predicate.
 type FilterExecutor struct {
-	// Fill me in!
+	planNode      *planner.FilterNode
+	childExecutor Executor
 }
 
 // NewFilter creates a new FilterExecutor executor.
 func NewFilter(plan *planner.FilterNode, child Executor) *FilterExecutor {
-	panic("unimplemented")
+	filterExecutor := FilterExecutor{
+		planNode:      plan,
+		childExecutor: child,
+	}
+
+	return &filterExecutor
 }
 
 func (e *FilterExecutor) PlanNode() planner.PlanNode {
-	panic("unimplemented")
+	return e.planNode
 }
 
 // Init initializes the child.
 func (e *FilterExecutor) Init(context *ExecutorContext) error {
-	panic("unimplemented")
+	err := e.childExecutor.Init(context)
+	return err
 }
 
 func (e *FilterExecutor) Next() bool {
-	panic("unimplemented")
+	for exists := e.childExecutor.Next(); exists; exists = e.childExecutor.Next() {
+		tup := e.childExecutor.Current()
+		if planner.ExprIsTrue(e.planNode.Predicate.Eval(tup)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *FilterExecutor) Current() storage.Tuple {
-	panic("unimplemented")
+	return e.childExecutor.Current()
 }
 
 func (e *FilterExecutor) Error() error {
-	panic("unimplemented")
+	return e.childExecutor.Error()
 }
 
 func (e *FilterExecutor) Close() error {
-	panic("unimplemented")
+	return e.childExecutor.Close()
 }
