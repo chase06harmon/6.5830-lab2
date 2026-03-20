@@ -1,7 +1,7 @@
 # 6.5830/6.5831 Lab 3: Transactions & Concurrency Control
 
-**Assigned:** [Date]
-**Due:** [Date]
+**Assigned:** 03/20/2026
+**Due:** 04/16/2026
 
 ## Introduction
 In this lab, you will transform GoDB from a single-threaded query execution engine into a full transactional
