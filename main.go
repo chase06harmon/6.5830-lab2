@@ -76,7 +76,7 @@ func NewGoDB(catalog *catalog.Catalog, storageDir, logDir string, bufferPoolSize
 		&planner.SeqScanRule{},
 		&planner.IndexScanRule{},
 		&planner.IndexLookupRule{},
-		// &planner.IndexNestedLoopJoinRule{},
+		&planner.IndexNestedLoopJoinRule{},
 		// &planner.SortMergeJoinRule{},
 		&planner.HashJoinRule{},
 		&planner.BlockNestedLoopJoinRule{},
