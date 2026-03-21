@@ -74,11 +74,11 @@ func NewGoDB(catalog *catalog.Catalog, storageDir, logDir string, bufferPoolSize
 	// TODO: Activate rules as you implement the relevant executors in Lab 2
 	physicalRules := []planner.PhysicalConversionRule{
 		&planner.SeqScanRule{},
-		// &planner.IndexScanRule{},
-		// &planner.IndexLookupRule{},
+		&planner.IndexScanRule{},
+		&planner.IndexLookupRule{},
 		// &planner.IndexNestedLoopJoinRule{},
 		// &planner.SortMergeJoinRule{},
-		// &planner.HashJoinRule{},
+		&planner.HashJoinRule{},
 		&planner.BlockNestedLoopJoinRule{},
 		&planner.LimitRule{},
 		// You can activate this rule once you implement Materialize in lab2
