@@ -13,6 +13,7 @@ type AggregateExecutor struct {
 	hashTable     *ExecutionHashTable[[]common.Value]
 	iterChan      chan storage.Tuple
 	curTuple      storage.Tuple
+	err           error
 }
 
 func NewAggregateExecutor(plan *planner.AggregateNode, child Executor) *AggregateExecutor {
@@ -31,6 +32,7 @@ func NewAggregateExecutor(plan *planner.AggregateNode, child Executor) *Aggregat
 		planNode:      plan,
 		childExecutor: child,
 		hashTable:     hashTable,
+		err:           nil,
 	}
 
 	aggExec.iterChan = make(chan storage.Tuple)
@@ -43,11 +45,29 @@ func (e *AggregateExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *AggregateExecutor) Init(ctx *ExecutorContext) error {
-	e.childExecutor.Init(ctx)
+	e.err = nil
+	e.iterChan = make(chan storage.Tuple)
+
+	if err := e.childExecutor.Init(ctx); err != nil {
+		return err
+	}
+
+	if len(e.planNode.GroupByClause) > 0 {
+		groupByKeyTypes := make([]common.Type, len(e.planNode.GroupByClause))
+		for i, expr := range e.planNode.GroupByClause {
+			groupByKeyTypes[i] = expr.OutputType()
+		}
+		e.hashTable = NewExecutionHashTable[[]common.Value](storage.NewRawTupleDesc(groupByKeyTypes))
+	}
 
 	if len(e.planNode.GroupByClause) > 0 {
 		exists := e.childExecutor.Next()
 		if !exists {
+			if err := e.childExecutor.Error(); err != nil {
+				e.err = err
+				close(e.iterChan)
+				return err
+			}
 			close(e.iterChan)
 			return nil
 		}
@@ -84,6 +104,12 @@ func (e *AggregateExecutor) Init(ctx *ExecutorContext) error {
 			}
 		}
 
+		if err := e.childExecutor.Error(); err != nil {
+			e.err = err
+			close(e.iterChan)
+			return err
+		}
+
 		go func() {
 			e.hashTable.Iterate(func(key storage.Tuple, value []common.Value) {
 				e.iterChan <- key.Extend(value)
@@ -107,6 +133,11 @@ func (e *AggregateExecutor) Init(ctx *ExecutorContext) error {
 		}
 		exists := e.childExecutor.Next()
 		if !exists {
+			if err := e.childExecutor.Error(); err != nil {
+				e.err = err
+				close(e.iterChan)
+				return err
+			}
 			close(e.iterChan)
 			return nil
 		}
@@ -118,6 +149,12 @@ func (e *AggregateExecutor) Init(ctx *ExecutorContext) error {
 				newVal := aggExpr.Expr.Eval(curTup)
 				aggVals[i] = computeNewAggValue(curAggVal, newVal, aggExpr.Type).Copy()
 			}
+		}
+
+		if err := e.childExecutor.Error(); err != nil {
+			e.err = err
+			close(e.iterChan)
+			return err
 		}
 
 		go func() {
@@ -170,6 +207,9 @@ func computeNewAggValue(curAggVal common.Value, newVal common.Value, aggType pla
 }
 
 func (e *AggregateExecutor) Next() bool {
+	if e.err != nil {
+		return false
+	}
 	tup, ok := <-e.iterChan
 	if !ok {
 		return false
@@ -183,6 +223,9 @@ func (e *AggregateExecutor) Current() storage.Tuple {
 }
 
 func (e *AggregateExecutor) Error() error {
+	if e.err != nil {
+		return e.err
+	}
 	return e.childExecutor.Error()
 }
 

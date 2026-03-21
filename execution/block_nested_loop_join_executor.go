@@ -24,6 +24,7 @@ type BlockNestedLoopJoinExecutor struct {
 	combDesc         *storage.RawTupleDesc
 	context          *ExecutorContext
 	started          bool
+	err              error
 }
 
 // NewBlockNestedLoopJoinExecutor creates a new BlockNestedLoopJoinExecutor.
@@ -45,6 +46,7 @@ func NewBlockNestedLoopJoinExecutor(plan *planner.NestedLoopJoinNode, left Execu
 		curOuterChunkIdx: 0,
 		combBuf:          combBuf,
 		combDesc:         combDesc,
+		err:              nil,
 	}
 	return &bNLJExec
 }
@@ -55,6 +57,7 @@ func (e *BlockNestedLoopJoinExecutor) PlanNode() planner.PlanNode {
 
 func (e *BlockNestedLoopJoinExecutor) Init(ctx *ExecutorContext) error {
 	e.context = ctx
+	e.err = nil
 
 	err := e.leftExecutor.Init(ctx)
 	if err != nil {
@@ -65,32 +68,48 @@ func (e *BlockNestedLoopJoinExecutor) Init(ctx *ExecutorContext) error {
 		return err
 	}
 
-	e.reloadBlock()
+	if ok := e.reloadBlock(); !ok {
+		return e.err
+	}
 	e.started = false
 
 	return nil
 }
 
-func (e *BlockNestedLoopJoinExecutor) reloadBlock() {
+func (e *BlockNestedLoopJoinExecutor) reloadBlock() bool {
 	leftDesc := storage.NewRawTupleDesc(e.planNode.Left.OutputSchema())
 	for i := 0; i < e.tupsPerBlock; i++ {
 		exists := e.leftExecutor.Next()
 		if !exists {
+			if err := e.leftExecutor.Error(); err != nil {
+				e.err = err
+				e.totalLoadedTups = 0
+				e.curOuterChunkIdx = 0
+				return false
+			}
 			e.totalLoadedTups = i
 			e.curOuterChunkIdx = 0
-			return
+			return true
 		}
 		e.leftExecutor.Current().WriteToBuffer(e.outerChunk[i*leftDesc.BytesPerTuple():], leftDesc)
 	}
 
 	e.totalLoadedTups = e.tupsPerBlock
 	e.curOuterChunkIdx = 0
+	return true
 }
 
 func (e *BlockNestedLoopJoinExecutor) Next() bool {
+	if e.err != nil {
+		return false
+	}
+
 	if !e.started {
 		status := e.rightExecutor.Next()
 		if !status {
+			if err := e.rightExecutor.Error(); err != nil {
+				e.err = err
+			}
 			return false
 		}
 		e.started = true
@@ -110,6 +129,10 @@ func (e *BlockNestedLoopJoinExecutor) Next() bool {
 			e.curOuterChunkIdx = 0
 			rightExists := e.rightExecutor.Next()
 			if !rightExists {
+				if err := e.rightExecutor.Error(); err != nil {
+					e.err = err
+					return false
+				}
 				break
 			}
 		}
@@ -117,9 +140,19 @@ func (e *BlockNestedLoopJoinExecutor) Next() bool {
 		if e.totalLoadedTups < e.tupsPerBlock { // the last reload was the last one
 			return false
 		} else {
-			e.reloadBlock()
-			e.rightExecutor.Init(e.context)
-			e.rightExecutor.Next()
+			if ok := e.reloadBlock(); !ok {
+				return false
+			}
+			if err := e.rightExecutor.Init(e.context); err != nil {
+				e.err = err
+				return false
+			}
+			if ok := e.rightExecutor.Next(); !ok {
+				if err := e.rightExecutor.Error(); err != nil {
+					e.err = err
+				}
+				return false
+			}
 		}
 	}
 
@@ -151,18 +184,20 @@ func (e *BlockNestedLoopJoinExecutor) Current() storage.Tuple {
 }
 
 func (e *BlockNestedLoopJoinExecutor) Error() error {
-	return nil
+	if e.err != nil {
+		return e.err
+	}
+	if rightErr := e.rightExecutor.Error(); rightErr != nil {
+		return rightErr
+	}
+	return e.leftExecutor.Error()
 }
 
 func (e *BlockNestedLoopJoinExecutor) Close() error {
-	err := e.rightExecutor.Close()
-	if err != nil {
-		return nil
+	rightErr := e.rightExecutor.Close()
+	leftErr := e.leftExecutor.Close()
+	if rightErr != nil {
+		return rightErr
 	}
-	err = e.leftExecutor.Close()
-	if err != nil {
-		return nil
-	}
-
-	return nil
+	return leftErr
 }

@@ -20,6 +20,7 @@ type HashJoinExecutor struct {
 	curNumOutput       int
 	combBuf            []byte
 	combDesc           *storage.RawTupleDesc
+	err                error
 }
 
 // NewHashJoinExecutor creates a new HashJoinExecutor.
@@ -36,6 +37,7 @@ func NewHashJoinExecutor(plan *planner.HashJoinNode, left Executor, right Execut
 		curNumOutput:       -1,
 		combBuf:            combBuf,
 		combDesc:           combDesc,
+		err:                nil,
 	}
 	return &hashJoinExec
 }
@@ -53,6 +55,8 @@ func (InvalidHashJoinKeysError) Error() string {
 }
 
 func (e *HashJoinExecutor) Init(ctx *ExecutorContext) error {
+	e.err = nil
+
 	err := e.leftChildExecutor.Init(ctx)
 	if err != nil {
 		return err
@@ -104,6 +108,10 @@ func (e *HashJoinExecutor) Init(ctx *ExecutorContext) error {
 			e.hashTable.Insert(keyTup, &curTups)
 		}
 	}
+	if leftErr := e.leftChildExecutor.Error(); leftErr != nil {
+		e.err = leftErr
+		return leftErr
+	}
 
 	e.curNumOutput = -1
 
@@ -128,8 +136,15 @@ func printTupleVal(tup storage.Tuple) {
 }
 
 func (e *HashJoinExecutor) Next() bool {
+	if e.err != nil {
+		return false
+	}
+
 	if e.curNumOutput < 0 {
 		if !e.rightChildExecutor.Next() {
+			if rightErr := e.rightChildExecutor.Error(); rightErr != nil {
+				e.err = rightErr
+			}
 			return false
 		}
 		e.curNumOutput = 0
@@ -151,6 +166,9 @@ func (e *HashJoinExecutor) Next() bool {
 
 		if nullKey {
 			if !e.rightChildExecutor.Next() {
+				if rightErr := e.rightChildExecutor.Error(); rightErr != nil {
+					e.err = rightErr
+				}
 				return false
 			}
 			e.curNumOutput = 0
@@ -167,6 +185,9 @@ func (e *HashJoinExecutor) Next() bool {
 			return true
 		} else {
 			if !e.rightChildExecutor.Next() {
+				if rightErr := e.rightChildExecutor.Error(); rightErr != nil {
+					e.err = rightErr
+				}
 				return false
 			}
 			e.curNumOutput = 0
@@ -179,6 +200,9 @@ func (e *HashJoinExecutor) Current() storage.Tuple {
 }
 
 func (e *HashJoinExecutor) Error() error {
+	if e.err != nil {
+		return e.err
+	}
 	rightErr := e.rightChildExecutor.Error()
 	leftErr := e.leftChildExecutor.Error()
 
@@ -194,14 +218,10 @@ func (e *HashJoinExecutor) Error() error {
 }
 
 func (e *HashJoinExecutor) Close() error {
-	err := e.rightChildExecutor.Close()
-	if err != nil {
-		return err
+	rightErr := e.rightChildExecutor.Close()
+	leftErr := e.leftChildExecutor.Close()
+	if rightErr != nil {
+		return rightErr
 	}
-	err = e.leftChildExecutor.Close()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return leftErr
 }

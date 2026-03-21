@@ -17,6 +17,8 @@ type DeleteExecutor struct {
 	indexes           []indexing.Index
 	context           *ExecutorContext
 	numAffected       int
+	done              bool
+	err               error
 }
 
 func NewDeleteExecutor(plan *planner.DeleteNode, child Executor, tableHeap *TableHeap, indexes []indexing.Index) *DeleteExecutor {
@@ -27,6 +29,8 @@ func NewDeleteExecutor(plan *planner.DeleteNode, child Executor, tableHeap *Tabl
 		indexes:           indexes,
 		context:           nil,
 		numAffected:       0,
+		done:              false,
+		err:               nil,
 	}
 
 	return &deletionExecutor
@@ -37,19 +41,26 @@ func (e *DeleteExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *DeleteExecutor) Init(ctx *ExecutorContext) error {
-	err := e.childExecutor.Init(ctx)
 	e.context = ctx
-	return err
+	e.numAffected = 0
+	e.done = false
+	e.err = nil
+	return e.childExecutor.Init(ctx)
 }
 
 func (e *DeleteExecutor) Next() bool {
+	if e.done || e.err != nil {
+		return false
+	}
+
 	numAffected := 0
 	txnContext := e.context.GetTransaction()
 	for exists := e.childExecutor.Next(); exists; exists = e.childExecutor.Next() {
 		curTup := e.childExecutor.Current()
 		err := e.deletionTableHeap.DeleteTuple(txnContext, curTup.RID())
 		if err != nil {
-			break
+			e.err = err
+			return false
 		}
 		for _, index := range e.indexes {
 			md := index.Metadata()
@@ -60,13 +71,22 @@ func (e *DeleteExecutor) Next() bool {
 				md.KeySchema.SetValue(keyBuf, k, v)
 			}
 			key := md.AsKey(keyBuf)
-			index.DeleteEntry(key, curTup.RID(), txnContext)
+			if err := index.DeleteEntry(key, curTup.RID(), txnContext); err != nil {
+				e.err = err
+				return false
+			}
 		}
 		numAffected++
 	}
 
+	if childErr := e.childExecutor.Error(); childErr != nil {
+		e.err = childErr
+		return false
+	}
+
 	e.numAffected = numAffected
-	return numAffected > 0
+	e.done = true
+	return true
 }
 
 func (e *DeleteExecutor) Current() storage.Tuple {
@@ -78,5 +98,8 @@ func (e *DeleteExecutor) Close() error {
 }
 
 func (e *DeleteExecutor) Error() error {
+	if e.err != nil {
+		return e.err
+	}
 	return e.childExecutor.Error()
 }

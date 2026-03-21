@@ -64,6 +64,7 @@ type TopNExecutor struct {
 	childExecutor Executor
 	heap          *TupleHeap
 	numOutput     int
+	err           error
 }
 
 func NewTopNExecutor(plan *planner.TopNNode, child Executor) *TopNExecutor {
@@ -74,6 +75,7 @@ func NewTopNExecutor(plan *planner.TopNNode, child Executor) *TopNExecutor {
 			items:    make([]storage.Tuple, 0),
 			orderBys: plan.OrderBy,
 		},
+		err: nil,
 	}
 	return &topNExecutor
 }
@@ -83,6 +85,10 @@ func (e *TopNExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *TopNExecutor) Init(ctx *ExecutorContext) error {
+	e.err = nil
+	e.numOutput = 0
+	e.heap.items = e.heap.items[:0]
+
 	err := e.childExecutor.Init(ctx)
 	if err != nil {
 		return err
@@ -95,6 +101,10 @@ func (e *TopNExecutor) Init(ctx *ExecutorContext) error {
 		if e.heap.Len() > e.planNode.Limit {
 			heap.Pop(e.heap)
 		}
+	}
+	if childErr := e.childExecutor.Error(); childErr != nil {
+		e.err = childErr
+		return childErr
 	}
 
 	sort.Slice(e.heap.items, func(i, j int) bool {
@@ -130,6 +140,9 @@ func (e *TopNExecutor) Current() storage.Tuple {
 }
 
 func (e *TopNExecutor) Error() error {
+	if e.err != nil {
+		return e.err
+	}
 	return e.childExecutor.Error()
 }
 

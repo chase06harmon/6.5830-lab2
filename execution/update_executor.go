@@ -1,8 +1,6 @@
 package execution
 
 import (
-	"fmt"
-
 	"mit.edu/dsg/godb/common"
 	"mit.edu/dsg/godb/indexing"
 	"mit.edu/dsg/godb/planner"
@@ -22,6 +20,8 @@ type UpdateExecutor struct {
 	context         *ExecutorContext
 	buf             []byte
 	numAffected     int
+	done            bool
+	err             error
 }
 
 func NewUpdateExecutor(plan *planner.UpdateNode, child Executor, tableHeap *TableHeap, indexes []indexing.Index) *UpdateExecutor {
@@ -33,6 +33,9 @@ func NewUpdateExecutor(plan *planner.UpdateNode, child Executor, tableHeap *Tabl
 		indexes:         indexes,
 		context:         nil,
 		buf:             buf,
+		numAffected:     0,
+		done:            false,
+		err:             nil,
 	}
 
 	return &insertExecutor
@@ -44,12 +47,18 @@ func (e *UpdateExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *UpdateExecutor) Init(ctx *ExecutorContext) error {
-	err := e.childExecutor.Init(ctx)
 	e.context = ctx
-	return err
+	e.numAffected = 0
+	e.done = false
+	e.err = nil
+	return e.childExecutor.Init(ctx)
 }
 
 func (e *UpdateExecutor) Next() bool {
+	if e.done || e.err != nil {
+		return false
+	}
+
 	numAffected := 0
 	txnContext := e.context.GetTransaction()
 	for exists := e.childExecutor.Next(); exists; exists = e.childExecutor.Next() {
@@ -68,7 +77,8 @@ func (e *UpdateExecutor) Next() bool {
 		newTup.WriteToBuffer(e.buf, e.updateTableHeap.desc)
 		err := e.updateTableHeap.UpdateTuple(txnContext, curTup.RID(), e.buf)
 		if err != nil {
-			break
+			e.err = err
+			return false
 		}
 
 		for _, index := range e.indexes {
@@ -101,14 +111,14 @@ func (e *UpdateExecutor) Next() bool {
 
 			err = index.DeleteEntry(oldKey, curTup.RID(), txnContext)
 			if err != nil {
-				fmt.Println(err)
-				break
+				e.err = err
+				return false
 			}
 
 			err = index.InsertEntry(newKey, curTup.RID(), e.context.GetTransaction())
 			if err != nil {
-				fmt.Println(err)
-				break
+				e.err = err
+				return false
 			}
 		}
 
@@ -116,8 +126,14 @@ func (e *UpdateExecutor) Next() bool {
 
 	}
 
+	if childErr := e.childExecutor.Error(); childErr != nil {
+		e.err = childErr
+		return false
+	}
+
 	e.numAffected = numAffected
-	return numAffected > 0
+	e.done = true
+	return true
 }
 
 func (e *UpdateExecutor) OutputSchema() []common.Type {
@@ -133,5 +149,8 @@ func (e *UpdateExecutor) Close() error {
 }
 
 func (e *UpdateExecutor) Error() error {
+	if e.err != nil {
+		return e.err
+	}
 	return e.childExecutor.Error()
 }

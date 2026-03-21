@@ -14,12 +14,14 @@ type SortExecutor struct {
 	childExecutor Executor
 	tuples        []storage.Tuple
 	curIdx        int
+	err           error
 }
 
 func NewSortExecutor(plan *planner.SortNode, child Executor) *SortExecutor {
 	se := SortExecutor{
 		planNode:      plan,
 		childExecutor: child,
+		err:           nil,
 	}
 	se.tuples = make([]storage.Tuple, 0)
 	return &se
@@ -30,12 +32,20 @@ func (e *SortExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *SortExecutor) Init(ctx *ExecutorContext) error {
+	e.tuples = e.tuples[:0]
+	e.curIdx = -1
+	e.err = nil
+
 	err := e.childExecutor.Init(ctx)
 	if err != nil {
 		return err
 	}
 	for exists := e.childExecutor.Next(); exists; exists = e.childExecutor.Next() {
 		e.tuples = append(e.tuples, e.childExecutor.Current().DeepCopy(storage.NewRawTupleDesc(e.planNode.Child.OutputSchema())))
+	}
+	if childErr := e.childExecutor.Error(); childErr != nil {
+		e.err = childErr
+		return childErr
 	}
 
 	sort.Slice(e.tuples, func(i, j int) bool {
@@ -52,8 +62,6 @@ func (e *SortExecutor) Init(ctx *ExecutorContext) error {
 		}
 		return false
 	})
-	e.curIdx = -1
-
 	return nil
 }
 
@@ -72,6 +80,9 @@ func (e *SortExecutor) Current() storage.Tuple {
 }
 
 func (e *SortExecutor) Error() error {
+	if e.err != nil {
+		return e.err
+	}
 	return e.childExecutor.Error()
 }
 

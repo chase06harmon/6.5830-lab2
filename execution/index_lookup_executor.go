@@ -18,6 +18,8 @@ type IndexLookupExecutor struct {
 	buf           []byte
 	rids          []common.RecordID
 	currentRIDIdx int
+	curRID        common.RecordID
+	err           error
 }
 
 func NewIndexLookupExecutor(plan *planner.IndexLookupNode, index indexing.Index, tableHeap *TableHeap) *IndexLookupExecutor {
@@ -32,6 +34,8 @@ func NewIndexLookupExecutor(plan *planner.IndexLookupNode, index indexing.Index,
 		buf:           buffer,
 		rids:          rids,
 		currentRIDIdx: -1,
+		curRID:        common.RecordID{},
+		err:           nil,
 	}
 
 	return &indexLookupExecutor
@@ -43,21 +47,34 @@ func (e *IndexLookupExecutor) PlanNode() planner.PlanNode {
 
 func (e *IndexLookupExecutor) Init(ctx *ExecutorContext) error {
 	e.context = ctx
+	e.err = nil
 	e.rids = e.rids[:0]
+	e.currentRIDIdx = -1
+	e.curRID = common.RecordID{}
 	rids, err := e.index.ScanKey(e.planNode.EqualityKey, e.rids, ctx.GetTransaction())
 
 	if err != nil {
 		return err
-	} else {
-		e.rids = rids
-		e.currentRIDIdx = -1
-		return nil
 	}
+
+	e.rids = rids
+	return nil
 }
 
 func (e *IndexLookupExecutor) Next() bool {
+	if e.err != nil {
+		return false
+	}
+
 	if e.currentRIDIdx+1 < len(e.rids) {
 		e.currentRIDIdx++
+		rid := e.rids[e.currentRIDIdx]
+		if err := e.tableHeap.ReadTuple(e.context.GetTransaction(), rid, e.buf, e.planNode.ForUpdate); err != nil {
+			e.err = err
+			return false
+		}
+
+		e.curRID = rid
 		return true
 	}
 
@@ -65,9 +82,7 @@ func (e *IndexLookupExecutor) Next() bool {
 }
 
 func (e *IndexLookupExecutor) Current() storage.Tuple {
-	rid := e.rids[e.currentRIDIdx]
-	e.tableHeap.ReadTuple(e.context.GetTransaction(), rid, e.buf, e.planNode.ForUpdate)
-	return storage.FromRawTuple(e.buf, e.tableHeap.desc, rid)
+	return storage.FromRawTuple(e.buf, e.tableHeap.desc, e.curRID)
 }
 
 func (e *IndexLookupExecutor) Close() error {
@@ -75,5 +90,5 @@ func (e *IndexLookupExecutor) Close() error {
 }
 
 func (e *IndexLookupExecutor) Error() error {
-	return nil
+	return e.err
 }

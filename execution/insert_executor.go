@@ -1,8 +1,6 @@
 package execution
 
 import (
-	"fmt"
-
 	"mit.edu/dsg/godb/common"
 	"mit.edu/dsg/godb/indexing"
 	"mit.edu/dsg/godb/planner"
@@ -22,6 +20,8 @@ type InsertExecutor struct {
 	context            *ExecutorContext
 	buf                []byte
 	numAffected        int
+	done               bool
+	err                error
 }
 
 func NewInsertExecutor(plan *planner.InsertNode, child Executor, tableHeap *TableHeap, indexes []indexing.Index) *InsertExecutor {
@@ -33,6 +33,9 @@ func NewInsertExecutor(plan *planner.InsertNode, child Executor, tableHeap *Tabl
 		indexes:            indexes,
 		context:            nil,
 		buf:                buf,
+		numAffected:        0,
+		done:               false,
+		err:                nil,
 	}
 
 	return &insertExecutor
@@ -43,20 +46,26 @@ func (e *InsertExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *InsertExecutor) Init(ctx *ExecutorContext) error {
-	err := e.childExecutor.Init(ctx)
 	e.context = ctx
-	return err
+	e.numAffected = 0
+	e.done = false
+	e.err = nil
+	return e.childExecutor.Init(ctx)
 }
 
 func (e *InsertExecutor) Next() bool {
+	if e.done || e.err != nil {
+		return false
+	}
+
 	numAffected := 0
 	for exists := e.childExecutor.Next(); exists; exists = e.childExecutor.Next() {
 		curTup := e.childExecutor.Current()
 		curTup.WriteToBuffer(e.buf, e.insertionTableHeap.desc)
 		rid, err := e.insertionTableHeap.InsertTuple(e.context.GetTransaction(), e.buf)
 		if err != nil {
-			fmt.Println(err)
-			break
+			e.err = err
+			return false
 		}
 		for _, index := range e.indexes {
 			md := index.Metadata()
@@ -69,15 +78,21 @@ func (e *InsertExecutor) Next() bool {
 			key := md.AsKey(keyBuf)
 			err = index.InsertEntry(key, rid, e.context.GetTransaction())
 			if err != nil {
-				fmt.Println(err)
-				break
+				e.err = err
+				return false
 			}
 		}
 		numAffected++
 	}
 
+	if childErr := e.childExecutor.Error(); childErr != nil {
+		e.err = childErr
+		return false
+	}
+
 	e.numAffected = numAffected
-	return numAffected > 0
+	e.done = true
+	return true
 }
 
 // Going to assume that numWritten should be cumulative or not?
@@ -91,5 +106,8 @@ func (e *InsertExecutor) Close() error {
 }
 
 func (e *InsertExecutor) Error() error {
+	if e.err != nil {
+		return e.err
+	}
 	return e.childExecutor.Error()
 }
