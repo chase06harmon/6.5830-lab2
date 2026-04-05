@@ -1,7 +1,7 @@
 # 6.5830/6.5831 Lab 4: Logging & Recovery
 
-**Assigned:** [Date]
-**Due:** [Date]
+**Assigned:** [04/03/2026]
+**Due:** [05/12/2026]
 
 ## Introduction
 
