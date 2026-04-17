@@ -37,11 +37,12 @@ func (e *SeqScanExecutor) Init(context *ExecutorContext) error {
 		context.GetTransaction(), e.scanNode.Mode, e.buffer,
 	)
 
+	e.iterator = &iter
+
 	if err != nil {
 		return err
 	}
 
-	e.iterator = &iter
 	return nil
 
 }

@@ -22,20 +22,40 @@ type WaitEntry struct {
 // 5 holder maps... one for each mode type -> txn compatibility checks are easy
 // waiters are just general waiters (can construct wait for graph)
 type LockObject struct {
-	holders [5]map[common.TransactionID]struct{}
-	waiters []WaitEntry // might want to use a ring buffer instead
-	upgrade *WaitEntry
+	holders      [5]map[common.TransactionID]struct{}
+	holderCounts [5]int
+	heldMode     map[common.TransactionID]DBLockMode
+	waiters      []WaitEntry // might want to use a ring buffer instead
+	upgrade      *WaitEntry
 }
 
 func (lockObj *LockObject) removeAllLocksHeldByTxn(tid common.TransactionID) bool {
-	removed := false
-	for mode := 0; mode < 5; mode++ {
-		if _, found := lockObj.holders[mode][tid]; found {
-			delete(lockObj.holders[mode], tid)
-			removed = true
-		}
+	mode, found := lockObj.heldMode[tid]
+	if !found {
+		return false
 	}
-	return removed
+
+	if _, isHolder := lockObj.holders[mode][tid]; isHolder {
+		delete(lockObj.holders[mode], tid)
+		lockObj.holderCounts[mode]--
+	}
+	delete(lockObj.heldMode, tid)
+	return true
+}
+
+func (lockObj *LockObject) grantLockToTxn(tid common.TransactionID, mode DBLockMode) {
+	if currentMode, found := lockObj.heldMode[tid]; found {
+		if currentMode == mode {
+			return
+		}
+		lockObj.removeAllLocksHeldByTxn(tid)
+	}
+
+	if _, alreadyHolding := lockObj.holders[mode][tid]; !alreadyHolding {
+		lockObj.holderCounts[mode]++
+	}
+	lockObj.holders[mode][tid] = struct{}{}
+	lockObj.heldMode[tid] = mode
 }
 
 // NewTableLockTag creates a DBLockTag representing a whole table.
@@ -115,25 +135,30 @@ func NewLockManager() *LockManager {
 }
 
 func (lockObj *LockObject) isLockReqCompatible(tid common.TransactionID, reqMode DBLockMode) bool {
-	switch reqMode {
-	case LockModeIS:
-		return !lockObj.existsOtherLockOfType(LockModeX, tid)
-	case LockModeIX:
-		return !(lockObj.existsOtherLockOfType(LockModeS, tid) || lockObj.existsOtherLockOfType(LockModeSIX, tid) || lockObj.existsOtherLockOfType(LockModeX, tid))
-	case LockModeS:
-		return !(lockObj.existsOtherLockOfType(LockModeIX, tid) || lockObj.existsOtherLockOfType(LockModeSIX, tid) || lockObj.existsOtherLockOfType(LockModeX, tid))
-	case LockModeSIX:
-		return !(lockObj.existsOtherLockOfType(LockModeIX, tid) || lockObj.existsOtherLockOfType(LockModeS, tid) || lockObj.existsOtherLockOfType(LockModeSIX, tid) || lockObj.existsOtherLockOfType(LockModeX, tid))
-	case LockModeX:
-		return !(lockObj.existsOtherLockOfType(LockModeIS, tid) || lockObj.existsOtherLockOfType(LockModeIX, tid) || lockObj.existsOtherLockOfType(LockModeS, tid) || lockObj.existsOtherLockOfType(LockModeSIX, tid) || lockObj.existsOtherLockOfType(LockModeX, tid))
-	default:
+	if reqMode < LockModeS || reqMode > LockModeSIX {
 		return false // probably want to pass an error back in this case
 	}
-}
 
-func (lockObj *LockObject) existsOtherLockOfType(mode DBLockMode, tid common.TransactionID) bool {
-	_, isCurrentlyHolding := lockObj.holders[mode][tid]
-	return !(len(lockObj.holders[mode]) == 0 || (len(lockObj.holders[mode]) == 1 && isCurrentlyHolding))
+	incompatibleMask := INCOMPATIBLE_MATRIX[reqMode]
+	currentMode, currentlyHolding := lockObj.heldMode[tid]
+	for mode := 0; mode < 5; mode++ {
+		if incompatibleMask&(1<<mode) == 0 {
+			continue
+		}
+
+		holderCount := lockObj.holderCounts[mode]
+		if holderCount == 0 {
+			continue
+		}
+		if holderCount > 1 {
+			return false
+		}
+		if !currentlyHolding || currentMode != DBLockMode(mode) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func isReqCoveredByMode(reqMode DBLockMode, existingMode DBLockMode) bool {
@@ -182,10 +207,8 @@ func (lockObj *LockObject) detectDeadlock(tid common.TransactionID, reqMode DBLo
 }
 
 func (lockObj *LockObject) currentlyHeldLockMode(tid common.TransactionID) DBLockMode {
-	for mode := 0; mode < 5; mode++ {
-		if _, exists := lockObj.holders[mode][tid]; exists {
-			return DBLockMode(mode)
-		}
+	if mode, exists := lockObj.heldMode[tid]; exists {
+		return mode
 	}
 
 	return -1
@@ -205,8 +228,9 @@ func (lm *LockManager) Lock(tid common.TransactionID, tag DBLockTag, mode DBLock
 		}
 
 		newLockObj := &LockObject{
-			holders: holders,
-			waiters: make([]WaitEntry, 0),
+			holders:  holders,
+			heldMode: make(map[common.TransactionID]DBLockMode),
+			waiters:  make([]WaitEntry, 0),
 		}
 		lm.locks[tag] = newLockObj
 		lockObj = newLockObj
@@ -225,10 +249,7 @@ func (lm *LockManager) Lock(tid common.TransactionID, tag DBLockTag, mode DBLock
 	// Existing holders are allowed to proceed (or queue as upgrades) on their own requests.
 	hasQueuedRequests := lockObj.upgrade != nil || len(lockObj.waiters) > 0
 	if lockObj.isLockReqCompatible(tid, mode) && (!hasQueuedRequests || currentLockMode != -1) {
-		if currentLockMode != -1 {
-			lockObj.removeAllLocksHeldByTxn(tid)
-		}
-		lockObj.holders[mode][tid] = struct{}{}
+		lockObj.grantLockToTxn(tid, mode)
 		lm.mu.Unlock()
 		return nil
 	}
@@ -294,18 +315,25 @@ func (lockObj *LockObject) tryGrantLockToWaiter(waiter WaitEntry) bool {
 	// if the only conflict is with the same tid, (note can only hold one lock at time) can also grant (but need to move holder to new set)
 	for mode := 0; mode < 5; mode++ {
 		if INCOMPATIBLE_MATRIX[mode]&(1<<waiter.mode) != 0 { // the request is incompatible with this mode
-			_, isReqTxnHolding := lockObj.holders[mode][waiter.tid]
-			if !(len(lockObj.holders[mode]) == 1 && isReqTxnHolding) && (len(lockObj.holders[mode]) > 0) {
+			holderCount := lockObj.holderCounts[mode]
+			if holderCount == 0 {
+				continue
+			}
+
+			if holderCount > 1 {
+				return false
+			}
+
+			heldMode, isReqTxnHolding := lockObj.heldMode[waiter.tid]
+			if !isReqTxnHolding || heldMode != DBLockMode(mode) {
 				return false
 			}
 		}
 	}
 
-	lockObj.removeAllLocksHeldByTxn(waiter.tid)
-
 	// fmt.Println("Lock Granted to: ", waiter.tid)
 
-	lockObj.holders[waiter.mode][waiter.tid] = struct{}{}
+	lockObj.grantLockToTxn(waiter.tid, waiter.mode)
 	waiter.grantedChan <- true
 
 	return true
@@ -371,9 +399,9 @@ func (lm *LockManager) LockHeld(tag DBLockTag) bool {
 		return false
 	}
 
-	return len(lockObj.holders[0]) > 0 ||
-		len(lockObj.holders[1]) > 0 ||
-		len(lockObj.holders[2]) > 0 ||
-		len(lockObj.holders[3]) > 0 ||
-		len(lockObj.holders[4]) > 0
+	return lockObj.holderCounts[0] > 0 ||
+		lockObj.holderCounts[1] > 0 ||
+		lockObj.holderCounts[2] > 0 ||
+		lockObj.holderCounts[3] > 0 ||
+		lockObj.holderCounts[4] > 0
 }

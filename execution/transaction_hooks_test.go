@@ -738,7 +738,7 @@ func TestIndexScan_SkipsKeyMismatch(t *testing.T) {
 }
 
 // ============ Uncomment these test cases if you chose to implement Index Nested Loop Join in Lab 2 =================
-/*
+
 // TestIndexNestedLoopJoin_AcquiresLocks verifies that running an
 // IndexNestedLoopJoinExecutor inside a transaction acquires the correct locks:
 //   - S on the left table (governed by the SeqScan's lock mode)
@@ -1010,7 +1010,6 @@ func TestIndexNestedLoopJoin_SkipsKeyMismatch(t *testing.T) {
 		assert.False(t, lm.LockHeld(rightTupleTag), "locks must be released after commit")
 	}
 }
-*/
 
 // TestBufferPool_WAL_BlocksEvictionUntilLogFlushed verifies the WAL-before-eviction
 // ordering property: dirty pages are evicted in ascending LSN order as flushedUntil

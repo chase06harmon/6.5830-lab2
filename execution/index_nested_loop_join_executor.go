@@ -11,19 +11,21 @@ import (
 // It iterates over the left child, and for each tuple, probes the index of the right table.
 // The expressions given for the left tuple should have the same schema as the right index's key
 type IndexNestedLoopJoinExecutor struct {
-	planNode          *planner.IndexNestedLoopJoinNode
-	leftChildExecutor Executor
-	rightIndex        indexing.Index
-	rightTableHeap    *TableHeap
-	context           *ExecutorContext
-	rightBuf          []byte
-	combBuf           []byte
-	combDesc          *storage.RawTupleDesc
-	rids              []common.RecordID
-	currentRIDIdx     int
-	curRID            common.RecordID
-	err               error
-	leftTupleSize     int
+	planNode           *planner.IndexNestedLoopJoinNode
+	leftChildExecutor  Executor
+	rightIndex         indexing.Index
+	rightTableHeap     *TableHeap
+	context            *ExecutorContext
+	rightBuf           []byte
+	combBuf            []byte
+	combDesc           *storage.RawTupleDesc
+	rids               []common.RecordID
+	currentRIDIdx      int
+	curRID             common.RecordID
+	err                error
+	leftTupleSize      int
+	leftKey            indexing.Key
+	rightRecheckKeyBuf []byte
 }
 
 // NewIndexJoinExecutor creates a new IndexNestedLoopJoinExecutor.
@@ -33,24 +35,27 @@ func NewIndexJoinExecutor(plan *planner.IndexNestedLoopJoinNode, left Executor, 
 
 	combDesc := storage.NewRawTupleDesc(plan.OutputSchema())
 	rightBuf := make([]byte, rightTableHeap.desc.BytesPerTuple())
+	rightRecheckKeyBuf := make([]byte, rightIndex.Metadata().KeySize())
 	rids := make([]common.RecordID, 0)
 
 	combBuf := make([]byte, combDesc.BytesPerTuple())
 
 	indexLookupExecutor := IndexNestedLoopJoinExecutor{
-		planNode:          plan,
-		leftChildExecutor: left,
-		rightIndex:        rightIndex,
-		rightTableHeap:    rightTableHeap,
-		context:           nil,
-		rightBuf:          rightBuf,
-		combBuf:           combBuf,
-		combDesc:          combDesc,
-		rids:              rids,
-		currentRIDIdx:     0,
-		curRID:            common.RecordID{},
-		err:               nil,
-		leftTupleSize:     leftTupleSize,
+		planNode:           plan,
+		leftChildExecutor:  left,
+		rightIndex:         rightIndex,
+		rightTableHeap:     rightTableHeap,
+		context:            nil,
+		rightBuf:           rightBuf,
+		combBuf:            combBuf,
+		combDesc:           combDesc,
+		rids:               rids,
+		currentRIDIdx:      0,
+		curRID:             common.RecordID{},
+		err:                nil,
+		leftTupleSize:      leftTupleSize,
+		leftKey:            indexing.Key{},
+		rightRecheckKeyBuf: rightRecheckKeyBuf,
 	}
 
 	return &indexLookupExecutor
@@ -91,8 +96,22 @@ func (e *IndexNestedLoopJoinExecutor) Next() bool {
 				e.rightBuf,
 				e.planNode.ForUpdate,
 			); err != nil {
+				if err == ErrTupleDeleted {
+					continue
+				}
 				e.err = err
 				return false
+			}
+
+			if e.leftKey.Compare(
+				makeProjectedKeyFromTuple(
+					e.rightBuf,
+					e.rightTableHeap.desc,
+					e.rightIndex.Metadata(),
+					e.rightRecheckKeyBuf,
+				),
+			) != 0 {
+				continue
 			}
 
 			e.curRID = rightRid
@@ -127,9 +146,9 @@ func (e *IndexNestedLoopJoinExecutor) Next() bool {
 		keyTup := storage.FromValues(keyVals...)
 		keyBuf := make([]byte, e.rightIndex.Metadata().KeySchema.BytesPerTuple())
 		keyTup.WriteToBuffer(keyBuf, e.rightIndex.Metadata().KeySchema)
-		key := e.rightIndex.Metadata().AsKey(keyBuf)
+		e.leftKey = e.rightIndex.Metadata().AsKey(keyBuf)
 
-		rids, err := e.rightIndex.ScanKey(key, e.rids[:0], e.context.GetTransaction())
+		rids, err := e.rightIndex.ScanKey(e.leftKey, e.rids[:0], e.context.GetTransaction())
 		if err != nil {
 			e.err = err
 			return false

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"math"
 	"sync"
 
 	"mit.edu/dsg/godb/common"
@@ -90,7 +91,9 @@ func (q *Queue) moveToFront(qNode *QueueNode) {
 }
 
 // Assumes the thread already holds the buffer pool lock
-func (bp *BufferPool) findEvictionVictim(q *Queue) (*QueueNode, bool) {
+func (bp *BufferPool) findEvictionVictim(q *Queue) (*QueueNode, LSN, bool) {
+	minLSN := LSN(math.MaxInt64)
+
 	for cur := q.tail.prev; cur != nil && cur.prev != nil; cur = cur.prev {
 		idx, ok := bp.pageTable[cur.pageId]
 		if !ok {
@@ -99,16 +102,22 @@ func (bp *BufferPool) findEvictionVictim(q *Queue) (*QueueNode, bool) {
 
 		pf := bp.pageArray[idx]
 		if pf.pinCount == 0 && pf.state == FrameReady {
+			if curLSN := pf.LSN(); pf.dirty && curLSN >= bp.logManager.FlushedUntil() {
+				if curLSN < minLSN {
+					minLSN = curLSN
+				}
+				continue
+			}
 			// A frame can briefly reach pinCount==0 before its page latch is released
 			// by user code. Avoid evicting while the latch is still held.
 			if !pf.PageLatch.TryLock() {
 				continue
 			}
 			pf.PageLatch.Unlock()
-			return cur, true
+			return cur, minLSN, true
 		}
 	}
-	return nil, false
+	return nil, minLSN, false
 }
 
 // NewBufferPool creates a new BufferPool with a fixed capacity defined by numPages. It requires a
@@ -266,6 +275,7 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 
 	for {
 		pageArrayIdx, cached := bp.pageTable[pageID]
+		minLSN := LSN(math.MaxInt64)
 
 		if !cached {
 			// --- Not in page table at all: load it --- once the page table fills the map should never decrease in size below bp.numPages
@@ -277,15 +287,26 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 				return pf, nil
 			}
 
-			if node, ok := bp.findEvictionVictim(&bp.rareQueue); ok {
+			if node, rareMinLSN, ok := bp.findEvictionVictim(&bp.rareQueue); ok {
 				pf := bp.pageArray[bp.pageTable[node.pageId]]
 				bp.evictAndInsert(&bp.rareQueue, node, pageID)
 				return pf, nil
+			} else {
+				minLSN = min(minLSN, rareMinLSN)
 			}
-			if node, ok := bp.findEvictionVictim(&bp.frequentQueue); ok {
+			if node, frequentMinLSN, ok := bp.findEvictionVictim(&bp.frequentQueue); ok {
 				pf := bp.pageArray[bp.pageTable[node.pageId]]
 				bp.evictAndInsert(&bp.frequentQueue, node, pageID)
 				return pf, nil
+			} else {
+				minLSN = min(minLSN, frequentMinLSN)
+			}
+
+			if minLSN != LSN(math.MaxInt64) {
+				bp.lock.Unlock()
+				bp.logManager.WaitUntilFlushed(minLSN)
+				bp.lock.Lock()
+				continue
 			}
 
 			bp.evictCond.Wait()
@@ -338,13 +359,8 @@ func (bp *BufferPool) UnpinPage(frame *PageFrame, setDirty bool) {
 	}
 }
 
-<<<<<<< HEAD
 // FlushAllPages flushes all dirty pages to disk that have an LSN less than `flushedUntil`, regardless of pins.
 // This is typically called during a checkpoint or Shutdown to ensure durability, but also useful for tests
-=======
-// FlushAllPages flushes all dirty pages to disk that have an LSN less than `flushedUntil`, regardless of pins.F
-// This is typically called during a Checkpoint or Shutdown to ensure durability, but also useful for tests
->>>>>>> a6e2bbc (working)
 func (bp *BufferPool) FlushAllPages() error {
 	type req struct {
 		pid common.PageID
@@ -358,7 +374,7 @@ func (bp *BufferPool) FlushAllPages() error {
 		pf := bp.pageArray[idx]
 		bp.waitNotBusy(pf)
 
-		if !pf.dirty {
+		if !pf.dirty || pf.LSN() >= bp.logManager.FlushedUntil() {
 			continue
 		}
 

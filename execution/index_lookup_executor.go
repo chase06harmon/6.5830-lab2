@@ -16,6 +16,7 @@ type IndexLookupExecutor struct {
 	tableHeap     *TableHeap
 	context       *ExecutorContext
 	buf           []byte
+	recheckKeyBuf []byte
 	rids          []common.RecordID
 	currentRIDIdx int
 	curRID        common.RecordID
@@ -24,6 +25,7 @@ type IndexLookupExecutor struct {
 
 func NewIndexLookupExecutor(plan *planner.IndexLookupNode, index indexing.Index, tableHeap *TableHeap) *IndexLookupExecutor {
 	buffer := make([]byte, tableHeap.desc.BytesPerTuple())
+	recheckKeyBuf := make([]byte, index.Metadata().KeySize())
 	rids := make([]common.RecordID, 0)
 
 	indexLookupExecutor := IndexLookupExecutor{
@@ -32,6 +34,7 @@ func NewIndexLookupExecutor(plan *planner.IndexLookupNode, index indexing.Index,
 		tableHeap:     tableHeap,
 		context:       nil,
 		buf:           buffer,
+		recheckKeyBuf: recheckKeyBuf,
 		rids:          rids,
 		currentRIDIdx: -1,
 		curRID:        common.RecordID{},
@@ -66,12 +69,21 @@ func (e *IndexLookupExecutor) Next() bool {
 		return false
 	}
 
-	if e.currentRIDIdx+1 < len(e.rids) {
+	for e.currentRIDIdx+1 < len(e.rids) {
 		e.currentRIDIdx++
 		rid := e.rids[e.currentRIDIdx]
 		if err := e.tableHeap.ReadTuple(e.context.GetTransaction(), rid, e.buf, e.planNode.ForUpdate); err != nil {
+			if err == ErrTupleDeleted {
+				continue
+			}
 			e.err = err
 			return false
+		}
+
+		if e.planNode.EqualityKey.Compare(
+			makeProjectedKeyFromTuple(e.buf, e.tableHeap.desc, e.index.Metadata(), e.recheckKeyBuf),
+		) != 0 {
+			continue
 		}
 
 		e.curRID = rid
@@ -91,4 +103,16 @@ func (e *IndexLookupExecutor) Close() error {
 
 func (e *IndexLookupExecutor) Error() error {
 	return e.err
+}
+
+func makeProjectedKeyFromTuple(
+	tuple storage.RawTuple,
+	tupleDesc *storage.RawTupleDesc,
+	md *indexing.IndexMetadata,
+	keyBuf []byte,
+) indexing.Key {
+	for keyIdx, tupleColIdx := range md.ProjectionList {
+		md.KeySchema.SetValue(keyBuf, keyIdx, tupleDesc.GetValue(tuple, tupleColIdx))
+	}
+	return md.AsKey(keyBuf)
 }

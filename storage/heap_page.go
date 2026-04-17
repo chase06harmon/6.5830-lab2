@@ -113,6 +113,10 @@ func (frame *PageFrame) AsHeapPage() HeapPage {
 	}
 }
 
+func (hp HeapPage) LSN() LSN {
+	return hp.frame.LSN()
+}
+
 func (hp HeapPage) FindFreeSlot() int {
 	startHint := hp.StartHint()
 	numSlots := hp.NumSlots()
